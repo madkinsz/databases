@@ -479,6 +479,51 @@ async def test_transaction_commit(database_url):
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
+async def test_transaction_usable_in_child_tasks(database_url):
+    async with Database(database_url) as database:
+        await database.connect()
+        async with database.transaction():
+            query = notes.insert().values(id=1, text="example1", completed=True)
+            await database.execute(query)
+
+            query = notes.update().where(notes.c.id == 1).values(text="example2")
+            await database.execute(query)
+            result = await database.fetch_one(notes.select().where(notes.c.id == 1))
+            assert result.text == "example2"
+
+            async def run_update_from_child_task():
+                query = notes.update().where(notes.c.id == 1).values(text="example3")
+                await database.execute(query)
+
+            await asyncio.create_task(run_update_from_child_task())
+            result = await database.fetch_one(notes.select().where(notes.c.id == 1))
+            assert result.text == "example3"
+
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_transaction_not_visible_from_other_tasks(database_url):
+    event1 = asyncio.Event()
+    event2 = asyncio.Event()
+
+    async with Database(database_url) as database:
+        await database.connect()
+
+        async def check_transaction():
+            await event1.wait()
+            assert transaction._get_open_transaction() is None
+            event2.set()
+
+        asyncio.create_task(check_transaction())
+
+        async with database.transaction() as transaction:
+            event1.set()
+            await event2.wait()
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
 async def test_transaction_commit_serializable(database_url):
     """
     Ensure that serializable transaction commit via extra parameters is supported.
